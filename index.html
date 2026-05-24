@@ -366,16 +366,25 @@ async function confirmUpload() {
 // ─── 数据处理 ───────────────────────────────────────────
 function processPSIData(raw, weekName) {
   const keys = Object.keys(raw[0] || {});
-  function findCol(kws) { for (const kw of kws) { const f = keys.find(k => k.toLowerCase().includes(kw)); if (f) return f; } return null; }
-  const skuCol = findCol(['sku','货号','编码']) || keys[0];
-  const nameCol = findCol(['品名','名称','product','name']);
-  const catCol = findCol(['品类','分类','category','系列']);
-  const cityCol = findCol(['城市','city','区域']);
-  const salesCol = findCol(['销量','sales','售出','sell','数量','qty']);
-  const inboundCol = findCol(['进货','入库','inbound','采购']);
-  const stockCol = findCol(['库存','stock','存货']);
-  const priceCol = findCol(['价格','price','单价','售价']);
-  const costCol = findCol(['成本','cost','进价']);
+  function findCol(kws) { for (const kw of kws) { const f = keys.find(k => k.toLowerCase().includes(kw.toLowerCase())); if (f) return f; } return null; }
+  const skuCol = findCol(['sku', 'model', '货号', '编码', 'code', 'id', '序号', '编号']);
+  const nameCol = findCol(['品名', '名称', 'product', 'name', '描述', 'desc', 'title', '标题']);
+  const catCol = findCol(['品类', '分类', 'category', '系列', 'series', 'type', '类别', '大类']);
+  const cityCol = findCol(['城市', 'city', '区域', '省份', '省', '地区', 'province', 'location', '地址', '门店']);
+  let salesCol = findCol(['销量', 'sale', '售出', 'sell', '数量', 'qty', 'quantity', '销售', '售', '总销量']);
+  let inboundCol = findCol(['进货', '入库', 'inbound', '采购', 'purchase', '进货量', '采购量', '入库量', '进货数']);
+  let stockCol = findCol(['库存', 'stock', '存货', '剩余', '结存', 'balance', 'inventory', '库存量']);
+  const priceCol = findCol(['价格', 'price', '单价', '售价', '零售', '零售价', '金额']);
+  const costCol = findCol(['成本', 'cost', '进价', '批发', '批发价', '采购价', 'buying']);
+
+  // 如果没匹配到数值列，自动用第一个数值列
+  const numCols = keys.filter(k => { const v = raw[0][k]; return typeof v === 'number' || (typeof v === 'string' && !isNaN(parseFloat(v))); });
+  if (!salesCol && !inboundCol && numCols.length > 0) {
+    salesCol = numCols[0]; inboundCol = numCols[0];
+    console.warn('未找到销量/进货列，自动使用第一个数值列:', salesCol);
+  }
+  if (!salesCol && inboundCol) salesCol = inboundCol;
+  if (!inboundCol && salesCol) inboundCol = salesCol;
   function num(row, col) { if (!col) return 0; const v = row[col]; if (typeof v === 'number') return v; const n = parseFloat(String(v).replace(/,/g,'')); return isNaN(n) ? 0 : n; }
   function str(row, col) { if (!col) return ''; return String(row[col] || '').trim(); }
   const categoryMap = {}, cityMap = {};
