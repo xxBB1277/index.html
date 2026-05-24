@@ -363,49 +363,123 @@ async function confirmUpload() {
   }, 800);
 }
 
-// ─── 数据处理 ───────────────────────────────────────────
+// ─── 数据处理（适配透视表格式）───────────────────────
 function processPSIData(raw, weekName) {
-  const keys = Object.keys(raw[0] || {});
-  function findCol(kws) { for (const kw of kws) { const f = keys.find(k => k.toLowerCase().includes(kw.toLowerCase())); if (f) return f; } return null; }
-  const skuCol = findCol(['sku', 'model', '货号', '编码', 'code', 'id', '序号', '编号']);
-  const nameCol = findCol(['品名', '名称', 'product', 'name', '描述', 'desc', 'title', '标题']);
-  const catCol = findCol(['品类', '分类', 'category', '系列', 'series', 'type', '类别', '大类']);
-  const cityCol = findCol(['城市', 'city', '区域', '省份', '省', '地区', 'province', 'location', '地址', '门店']);
-  let salesCol = findCol(['销量', 'sale', '售出', 'sell', '数量', 'qty', 'quantity', '销售', '售', '总销量']);
-  let inboundCol = findCol(['进货', '入库', 'inbound', '采购', 'purchase', '进货量', '采购量', '入库量', '进货数']);
-  let stockCol = findCol(['库存', 'stock', '存货', '剩余', '结存', 'balance', 'inventory', '库存量']);
-  const priceCol = findCol(['价格', 'price', '单价', '售价', '零售', '零售价', '金额']);
-  const costCol = findCol(['成本', 'cost', '进价', '批发', '批发价', '采购价', 'buying']);
+  // raw 是 XLSX 的 JSON 数组，每行是 {列名: 值}
+  // 透视表格式：第一行是子标题行，从第二行起是实际数据
+  const headerRow = raw[0] || {};
+  const cols = Object.keys(headerRow);
 
-  // 如果没匹配到数值列，自动用第一个数值列
-  const numCols = keys.filter(k => { const v = raw[0][k]; return typeof v === 'number' || (typeof v === 'string' && !isNaN(parseFloat(v))); });
-  if (!salesCol && !inboundCol && numCols.length > 0) {
-    salesCol = numCols[0]; inboundCol = numCols[0];
-    console.warn('未找到销量/进货列，自动使用第一个数值列:', salesCol);
+  // 第0列：SUMMARY = 产品/SKU 名称
+  const skuCol = cols[0]; // "SUMMARY"
+
+  // 识别城市列：列名不是 SUMMARY 开头的就是城市名
+  // 每个城市有 4 个子列: Purchase, Sales, Inventory, WOS
+  const cityGroups = [];
+  let currentCity = null;
+  for (let i = 1; i < cols.length; i++) {
+    const colName = cols[i];
+    if (!colName.startsWith('__EMPTY') && colName !== 'SUMMARY') {
+      // 这是一个城市列
+      currentCity = colName;
+      cityGroups.push({ name: currentCity, cols: [colName], startIdx: i });
+    } else if (currentCity && colName.startsWith('__EMPTY')) {
+      // 这是当前城市的子列
+      const last = cityGroups[cityGroups.length - 1];
+      if (last && last.cols.length < 4) last.cols.push(colName);
+    }
   }
-  if (!salesCol && inboundCol) salesCol = inboundCol;
-  if (!inboundCol && salesCol) inboundCol = salesCol;
-  function num(row, col) { if (!col) return 0; const v = row[col]; if (typeof v === 'number') return v; const n = parseFloat(String(v).replace(/,/g,'')); return isNaN(n) ? 0 : n; }
-  function str(row, col) { if (!col) return ''; return String(row[col] || '').trim(); }
-  const categoryMap = {}, cityMap = {};
-  const skus = raw.map(row => {
-    const sales = num(row, salesCol), inbound = num(row, inboundCol), stock = num(row, stockCol);
-    const price = num(row, priceCol), cost = num(row, costCol);
-    const cat = str(row, catCol) || '其他', city = str(row, cityCol) || '未知';
-    const revenue = sales * price, profit = revenue - sales * cost;
-    const sku = { sku: str(row, skuCol), name: str(row, nameCol), category: cat, city, sales, inbound, stock, price, profit, profitRate: revenue > 0 ? Math.round((profit/revenue)*10000)/100 : 0 };
-    if (!categoryMap[cat]) categoryMap[cat] = { sales:0, count:0 };
-    categoryMap[cat].sales += sales; categoryMap[cat].count += 1;
-    if (!cityMap[city]) cityMap[city] = { sales:0, count:0 };
-    cityMap[city].sales += sales; cityMap[city].count += 1;
-    return sku;
+
+  // 子标题在 raw[0]（第一行数据），值如: "Purchase", "Sales", "Inventory", "WOS"
+  const subHeaders = raw[0] || {};
+  const subLabels = cols.map(c => String(subHeaders[c] || '').trim().toLowerCase());
+
+  // 对每个城市，找出 Purchase/Sales/Inventory 列
+  cityGroups.forEach(cg => {
+    const cityCols = cg.cols;
+    const cityStart = cg.startIdx;
+    cg.purchaseIdx = cityCols.findIndex((c, i) => subLabels[cityStart + i].includes('purchase'));
+    cg.salesIdx = cityCols.findIndex((c, i) => subLabels[cityStart + i].includes('sale'));
+    cg.inventoryIdx = cityCols.findIndex((c, i) => subLabels[cityStart + i].includes('inventory'));
+    // 回退: 如果没匹配到，用位置推测 (Purchase=0, Sales=1, Inventory=2, WOS=3)
+    if (cg.purchaseIdx < 0) cg.purchaseIdx = 0;
+    if (cg.salesIdx < 0) cg.salesIdx = 1;
+    if (cg.inventoryIdx < 0) cg.inventoryIdx = 2;
   });
-  const totalSales = skus.reduce((s,x) => s+x.sales, 0);
-  const totalInbound = skus.reduce((s,x) => s+x.inbound, 0);
-  const totalStock = skus.reduce((s,x) => s+x.stock, 0);
-  const categories = Object.entries(categoryMap).map(([k,v]) => ({ name:k, sales:v.sales, count:v.count })).sort((a,b)=>b.sales-a.sales);
-  const cities = Object.entries(cityMap).map(([k,v]) => ({ name:k, sales:v.sales, count:v.count })).sort((a,b)=>b.sales-a.sales);
-  return { name: weekName, uploadedAt: new Date().toISOString(), meta: { totalSales, totalInbound, totalStock, skuCount: skus.length, categoryCount: categories.length }, skus, categories, cities };
+
+  function getCell(row, colName) {
+    const v = row[colName];
+    if (typeof v === 'number') return v;
+    if (v === undefined || v === null || v === '') return 0;
+    const n = parseFloat(String(v).replace(/,/g, ''));
+    return isNaN(n) ? 0 : n;
+  }
+
+  const categoryMap = {}, cityDataMap = {};
+  const allSkus = [];
+
+  // 从 raw[1] 开始是产品数据（raw[0] 是子标题行）
+  for (let r = 1; r < raw.length; r++) {
+    const row = raw[r];
+    const sku = String(row[skuCol] || '').trim();
+    if (!sku || sku.toLowerCase().includes('total') || sku.toLowerCase().includes('grand')) continue; // 跳过汇总行
+
+    let totalSales = 0, totalInbound = 0, totalStock = 0;
+    const cityItems = [];
+
+    for (const cg of cityGroups) {
+      const cityCols = cg.cols;
+      const cityStart = cg.startIdx;
+      const sales = getCell(row, cityCols[cg.salesIdx] || cols[cityStart + cg.salesIdx]);
+      const purchase = getCell(row, cityCols[cg.purchaseIdx] || cols[cityStart + cg.purchaseIdx]);
+      const inventory = getCell(row, cityCols[cg.inventoryIdx] || cols[cityStart + cg.inventoryIdx]);
+
+      totalSales += sales;
+      totalInbound += purchase;
+      totalStock += inventory;
+
+      if (sales > 0 || purchase > 0 || inventory > 0) {
+        cityItems.push({ city: cg.name, sales, inbound: purchase, stock: inventory });
+        if (!cityDataMap[cg.name]) cityDataMap[cg.name] = { sales: 0, inbound: 0, stock: 0, count: 0 };
+        cityDataMap[cg.name].sales += sales;
+        cityDataMap[cg.name].inbound += purchase;
+        cityDataMap[cg.name].stock += inventory;
+        cityDataMap[cg.name].count += 1;
+      }
+    }
+
+    // 品类从 SUMMARY 列的前缀推断（比如 "Xw3" → "Watch" 品类）
+    const cat = '所有品类'; // 透视表没有品类字段，统归一类
+    if (!categoryMap[cat]) categoryMap[cat] = { sales: 0, inbound: 0, stock: 0, count: 0 };
+    categoryMap[cat].sales += totalSales;
+    categoryMap[cat].inbound += totalInbound;
+    categoryMap[cat].stock += totalStock;
+    categoryMap[cat].count += 1;
+
+    allSkus.push({
+      sku, name: sku, category: cat, city: cityItems.map(c => c.city).join(', '),
+      sales: totalSales, inbound: totalInbound, stock: totalStock,
+      price: 0, profit: 0, profitRate: 0
+    });
+  }
+
+  const totalSales = allSkus.reduce((s, x) => s + x.sales, 0);
+  const totalInbound = allSkus.reduce((s, x) => s + x.inbound, 0);
+  const totalStock = allSkus.reduce((s, x) => s + x.stock, 0);
+
+  const categories = Object.entries(categoryMap).map(([k, v]) => ({
+    name: k, sales: v.sales, inbound: v.inbound, stock: v.stock, count: v.count
+  })).sort((a, b) => b.sales - a.sales);
+
+  const cities = Object.entries(cityDataMap).map(([k, v]) => ({
+    name: k, sales: v.sales, inbound: v.inbound, stock: v.stock, count: v.count
+  })).sort((a, b) => b.sales - a.sales);
+
+  return {
+    name: weekName, uploadedAt: new Date().toISOString(),
+    meta: { totalSales, totalInbound, totalStock, skuCount: allSkus.length, categoryCount: categories.length, cityCount: cities.length },
+    skus: allSkus, categories, cities
+  };
 }
 
 // ─── 数据看板 ───────────────────────────────────────────
