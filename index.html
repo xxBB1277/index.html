@@ -210,50 +210,51 @@
 
 <script>
 // ─── 配置 ─────────────────────────────────────────────
-const GIST_ID = 'YOUR_GIST_ID_HERE'; // 首次运行会自动创建
 const GIST_FILENAME = 'psi_data.json';
 
 function getToken() { return localStorage.getItem('github_token') || ''; }
 function setToken(t) { localStorage.setItem('github_token', t); }
+function getGistId() { return localStorage.getItem('gist_id'); }
+function setGistId(id) { localStorage.setItem('gist_id', id); }
 
 // ─── Gist API 封装 ────────────────────────────────────
-async function gistGet() {
-  const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-    headers: { 'Authorization': `token ${getToken()}`, 'Accept': 'application/vnd.github.v3+json' }
+async function gistGet(gistId) {
+  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: { 'Authorization': `Bearer ${getToken()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   });
-  if (!res.ok) throw new Error('读取 Gist 失败：' + res.statusText);
+  if (!res.ok) throw new Error('读取 Gist 失败（' + res.status + '）：' + (await res.text()).slice(0,100));
   const data = await res.json();
   const content = data.files[GIST_FILENAME]?.content || '{"weeks":[]}';
   return JSON.parse(content);
 }
 
-async function gistSave(data) {
-  const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+async function gistSave(gistId, data) {
+  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
     method: 'PATCH',
-    headers: { 'Authorization': `token ${getToken()}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
+    headers: { 'Authorization': `Bearer ${getToken()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
     body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } } })
   });
-  if (!res.ok) throw new Error('保存 Gist 失败：' + res.statusText);
+  if (!res.ok) throw new Error('保存 Gist 失败（' + res.status + '）：' + (await res.text()).slice(0,100));
   return res.json();
 }
 
 async function gistCreate(data) {
   const res = await fetch('https://api.github.com/gists', {
     method: 'POST',
-    headers: { 'Authorization': `token ${getToken()}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
+    headers: { 'Authorization': `Bearer ${getToken()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
     body: JSON.stringify({ public: false, files: { [GIST_FILENAME]: { content: JSON.stringify(data, null, 2) } }, description: 'PSI Dashboard Data Storage' })
   });
-  if (!res.ok) throw new Error('创建 Gist 失败：' + res.statusText);
+  if (!res.ok) throw new Error('创建 Gist 失败（' + res.status + '）：' + (await res.text()).slice(0,100));
   const gist = await res.json();
-  localStorage.setItem('gist_id', gist.id);
+  setGistId(gist.id);
   return gist;
 }
 
 async function loadData() {
   if (!getToken()) return { weeks: [] };
   try {
-    const gistId = localStorage.getItem('gist_id');
-    if (gistId) return await gistGet();
+    const gistId = getGistId();
+    if (gistId) return await gistGet(gistId);
     return { weeks: [] };
   } catch {
     return { weeks: [] };
@@ -263,10 +264,15 @@ async function loadData() {
 async function saveData(data) {
   if (!getToken()) { showToast('请先配置 GitHub Token', 'error'); return false; }
   try {
-    let gistId = localStorage.getItem('gist_id');
-    if (!gistId) { await gistCreate(data); }
-    else { GIST_ID_CURRENT = gistId; await gistSave(data); }
-    return true;
+    let gistId = getGistId();
+    if (!gistId) {
+      const gist = await gistCreate(data);
+      // gistId already saved by gistCreate
+      return true;
+    } else {
+      await gistSave(gistId, data);
+      return true;
+    }
   } catch (e) {
     showToast('保存失败：' + e.message, 'error');
     return false;
